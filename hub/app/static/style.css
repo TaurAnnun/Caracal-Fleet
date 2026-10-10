@@ -183,7 +183,7 @@ aside .icon-btn { color: var(--muted); }
 .dropdown a:hover, .dropdown button:hover { background: var(--accent); color: var(--accent-ink); }
 .dd-head { padding: 8px 10px; border-bottom: 1px solid var(--line); margin-bottom: 4px; display: grid; }
 .dd-head small { color: var(--muted); }
-#view { padding: 8px 28px 64px; display: grid; gap: 20px; align-content: start; }
+#view { padding: 8px 28px 64px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-content: start; }
 
 /* ---------- panels & layout */
 .card { background: var(--panel); border-radius: var(--r-lg); padding: 18px 20px; min-width: 0; box-shadow: var(--lift); }
@@ -333,13 +333,14 @@ a.stat:hover { transform: translateY(-2px); box-shadow: 0 10px 24px -10px rgb(0 
 .back:hover { opacity: .8; }
 .dev-hero { display: flex; justify-content: space-between; align-items: center; gap: 18px; flex-wrap: wrap; }
 .dev-hero.slim { padding: 14px 18px; }
-.device-hero { display: grid; gap: 16px; }
+.device-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.device-hero > div, .hero-main { min-width: 0; }
 #devActions { padding-top: 16px; border-top: 1px solid var(--line); }
 .hero-title { display: flex; align-items: center; gap: 12px; }
 .hero-title h2 { font-size: 26px; font-weight: 700; letter-spacing: -.025em; }
 .hero-title h2 a { color: inherit; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.chips span { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 99px; background: var(--fill-2); font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chips span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 99px; background: var(--fill-2); font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .chips .ic { width: 13px; height: 13px; }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .alert-list { display: grid; gap: 8px; }
@@ -500,7 +501,7 @@ dialog::backdrop { background: rgb(0 0 0 / .28); backdrop-filter: blur(4px); -we
 
 /* ---------- action bar of a device or the selection; menus, context menu */
 .action-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.action-group { display: inline-flex; margin-right: 6px; border-radius: var(--r); box-shadow: 0 0 0 .5px var(--line-strong), 0 1px 2px rgb(0 0 0 / .06); }
+.action-group { display: inline-flex; flex-wrap: wrap; max-width: 100%; margin-right: 6px; border-radius: var(--r); box-shadow: 0 0 0 .5px var(--line-strong), 0 1px 2px rgb(0 0 0 / .06); }
 .action-group .btn { border-radius: 0; box-shadow: none; }
 .action-group .btn + .btn { box-shadow: -.5px 0 0 var(--line-strong); }
 .action-group .btn:first-child { border-radius: var(--r) 0 0 var(--r); }
