@@ -73,6 +73,49 @@ def seed_history(db_path, device_ids):
     c.close()
 
 
+def fake_screen(node, local, item, left, duration, frozen):
+    """A picture of the TV for the screenshot preview: the page being shown, the countdown bar and the notification
+    the overlay would show, drawn with the node's own renderer (player/notify_render.py; Pillow needed)."""
+    import io
+    sys.path.insert(0, str(NODE_REPO / 'player'))
+    import notify_render as R
+    from PIL import ImageDraw
+    sw, sh = 1920, 1080
+    img = R.gradient((sw, sh), (14, 20, 32), (26, 36, 56), 'diagonal')
+    d = ImageDraw.Draw(img)
+    d.text((90, 70), item.get('name', ''), font=R.font('DejaVu Sans', True, 54), fill=(240, 244, 250))
+    d.text((92, 140), item.get('source', ''), font=R.font('DejaVu Sans', False, 24), fill=(140, 150, 170))
+    rnd = random.Random(item.get('id'))
+    for i, (x, y, w, h) in enumerate(((90, 210, 1100, 480), (1240, 210, 590, 220), (1240, 470, 590, 220), (90, 730, 1740, 260))):
+        d.rounded_rectangle((x, y, x + w, y + h), 22, fill=(30, 41, 62))
+        pts = [(x + 30 + k * (w - 60) / 23, y + h - 40 - rnd.random() * (h - 110)) for k in range(24)]
+        d.line(pts, fill=((232, 93, 63), (59, 130, 246), (34, 197, 94), (245, 158, 11))[i], width=5, joint='curve')
+    bar = 8
+    d.rectangle((0, sh - bar, sw, sh), fill=(17, 24, 39))
+    d.rectangle((0, sh - bar, sw if frozen else int(sw * (1 - left / max(1, duration))), sh), fill=(232, 93, 63))
+    try:
+        data = local.get(node + '/api/notify/overlay', timeout=5).json()
+        cur = data.get('current') if data.get('enabled') else None
+        if cur:
+            st = {**(data.get('style') or {}), **{k: v for k, v in (cur.get('look') or {}).items() if k in ('image', 'image_pos', 'image_size')}}
+            pic = None
+            if st.get('image') and data.get('image'):
+                from PIL import Image
+                pic = Image.open(io.BytesIO(local.get(node + '/api/notify/image/overlay', timeout=5).content)).convert('RGBA')
+            g = R.layout(cur, {**data, 'bar_height': bar}, st, sw, sh, pic)
+            box = R.window_box(g, sw, sh)
+            out, rect, color, _ = R.render(cur, data, st, g, box, img.crop(box), pic)
+            img.paste(out, box[:2])
+            if rect:
+                frac = max(0.0, min(1.0, float(cur.get('remaining') or 0) / max(1.0, float(cur.get('duration') or 1))))
+                ImageDraw.Draw(img).rectangle((box[0] + rect[0], box[1] + rect[1], box[0] + rect[0] + int((rect[2] - rect[0]) * frac), box[1] + rect[3]), fill=color)
+    except Exception as e:   # noqa: BLE001 - the preview still shows the page
+        print('demo screen: notification not drawn:', e)
+    buf = io.BytesIO()
+    img.resize((1280, 720)).save(buf, 'JPEG', quality=80)
+    return buf.getvalue()
+
+
 def simulated_player(node, key_file):
     """What the CARACAL player does for the overlay and Fleet: plays the playlist, reports it every second and
     follows the commands of the node's admin UI (v2) and of CARACAL Fleet (v6): next, show, freeze, unfreeze."""
@@ -81,7 +124,7 @@ def simulated_player(node, key_file):
     while True:
         try:
             local.headers['X-Caracal-Local'] = key_file.read_text().strip()
-            items = local.get(node + '/api/player/playlist', timeout=5).json() or []
+            items = local.get(node + '/api/player/playlist-expanded', timeout=5).json() or []
             ids = [x['id'] for x in items]
             for path, target in (('/api/v2/player/command', 'asset_id'), ('/api/v6/player/command', 'item_id')):
                 cmd = local.get(node + path, timeout=5).json()
@@ -103,6 +146,14 @@ def simulated_player(node, key_file):
                 left = duration if left is None else left
                 local.post(node + '/api/v2/player/heartbeat', timeout=5, json={
                     'current_id': item['id'], 'current_name': item['name'], 'frozen': frozen, 'remaining': left, 'duration': duration})
+                # the overlay's job on a real device: a picture of the screen when the admin UI or Fleet asks
+                shot = local.get(node + '/api/notify/overlay', timeout=5).json().get('screenshot')
+                if shot and shot != seen.get('shot'):
+                    seen['shot'] = shot
+                    try:
+                        local.post(node + f'/api/screenshot/upload?id={shot}', data=fake_screen(node, local, item, left, duration, frozen), timeout=10)
+                    except ImportError:
+                        local.post(node + f'/api/screenshot/upload?id={shot}&error=Pillow%20is%20missing', timeout=10)
                 if not frozen:
                     left -= 1
                     if left <= 0:
@@ -137,6 +188,9 @@ def start_real_node(hub, agent_mod, with_overlay):
     finally:
         sys.dont_write_bytecode = False
         os.environ.pop('CARACAL_FLEET_KEY_FILE')
+    # no Grafana here: a collection lists made-up dashboards
+    mod._grafana_discover = lambda url, tag: [{'title': name, 'url': f'{url}/d/{tag}-{i}'} for i, name in
+                                              enumerate(('Linka 1 – výkon', 'Linka 2 – teploty', 'Sklad – zásoby', 'Energie'))]
     node = f'http://127.0.0.1:{NODE_PORT}'
     serve(mod.app, NODE_PORT)
     s = requests.Session()
@@ -147,6 +201,7 @@ def start_real_node(hub, agent_mod, with_overlay):
     if not s.get(node + '/api/assets').json():
         for name, url, duration in (('Uvítání', 'https://example.com', 20), ('Výroba – Grafana', 'https://grafana.com', 30), ('Jídelníček', 'https://example.org', 15)):
             s.post(node + '/api/assets/url', data={'name': name, 'source': url, 'duration': duration})
+        s.post(node + '/api/assets/grafana-tag', data={'name': 'Výroba', 'grafana_url': 'https://grafana.example', 'tag': 'vyroba', 'duration': 20})
     threading.Thread(target=simulated_player, args=(node, data / 'local.key'), daemon=True).start()
     agent = agent_mod.Agent({'hub': hub, 'local_api': node, **enrolled})
     agent.service_active = lambda name: None

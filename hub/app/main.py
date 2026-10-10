@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import mimetypes
 import re
 import secrets
 import time
@@ -18,7 +19,7 @@ from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, 
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
                    sweep_commands, token_hash, validate_admin)
-from .devices import COLLECTION_KIND, MEDIA_KINDS, build, collections_of, grafana_config
+from .devices import COLLECTION_KIND, MEDIA_KINDS, SCREENSHOTS, build, collections_of, dashboards_of, grafana_config, notifications_of
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -43,7 +44,7 @@ app.include_router(monitor.router)      # metric history, events and alerts for 
 
 SECURITY_HEADERS = {
     # no inline scripts, no third-party resources; inline styles are used for progress bars
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
                                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
                                "form-action 'self'; object-src 'none'",
     'X-Content-Type-Options': 'nosniff',
@@ -248,6 +249,7 @@ def delete_device(did: str, r: Request):
         row = get_device_row(c, did)
         c.execute('DELETE FROM commands WHERE device_id=?', (did,))
         c.execute('DELETE FROM devices WHERE id=?', (did,))
+        (SCREENSHOTS / f'{did}.jpg').unlink(missing_ok=True)
         for table in ('metrics', 'issues', 'events'):
             c.execute(f'DELETE FROM {table} WHERE device_id=?', (did,))
     audit(u, 'device.delete', did, {'name': row['name']})
@@ -290,7 +292,8 @@ def validate_command(c, row, action, payload):
     if action in ('show', 'freeze'):
         if payload.get('item_id') in (None, ''):
             raise HTTPException(400, 'item_required')
-        known = [str(a.get('id')) for a in status.get('assets') or []]
+        known = [str(a.get('id')) for a in status.get('assets') or [] if isinstance(a, dict)]
+        known += [str(x['id']) for x in dashboards_of(status)]   # a single dashboard of a collection
         if known and str(payload['item_id']) not in known:
             raise HTTPException(409, 'item_not_found')
     if action in ('show_collection', 'freeze_collection'):
@@ -365,6 +368,13 @@ def validate_command(c, row, action, payload):
         payload = {'version': version, 'image': images.node_image(), **admin}
     if action in NOTIFY_CAPABILITY and (status.get('capabilities') or {}).get(NOTIFY_CAPABILITY[action]) is False:
         raise HTTPException(409, 'notifications_unsupported')
+    # newer than the agent or the node: only when the agent reports that the node has the endpoint
+    if action in NEW_CAPABILITY and (status.get('capabilities') or {}).get(NEW_CAPABILITY[action]) is not True:
+        raise HTTPException(409, 'update_required')
+    if action == 'notify_image':
+        payload = validate_notify_image(c, payload)
+    if action == 'screenshot':
+        payload = {}
     if action == 'notify':
         payload = validate_notification(payload)
     if action == 'notify_settings':
@@ -500,6 +510,11 @@ NOTIFY_CAPABILITY = {'notify': 'notify', 'notify_clear': 'notify_clear', 'notify
                      'notify_audit_clear': 'notify_audit_clear', 'update_notify_token': 'notify_token_update',
                      'delete_notify_token': 'notify_token_delete', 'preview_watcher': 'preview_watcher'}
 SOUND_MAX = 5 * 1024 ** 2
+# command -> local endpoint of the node, for commands that old agents do not know at all
+NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot'}
+IMAGE_MAX = 5 * 1024 ** 2
+NOTIFY_IMAGE_PLACES = ('none', 'left', 'right', 'top', 'bottom', 'background')
+SCREENSHOT_MAX = 8 * 1024 ** 2
 
 
 def flag(v):
@@ -569,6 +584,13 @@ def validate_notification(d):
         out['sound'] = flag(d['sound'])
     if text(d.get('key'), 200):
         out['key'] = text(d.get('key'), 200)
+    # the picture of this notification: where (or none) and how big; empty = as the look says (CARACAL 2026.10.10.4)
+    if d.get('image') not in (None, ''):
+        if d['image'] not in NOTIFY_IMAGE_PLACES:
+            raise HTTPException(400, 'invalid_value')
+        out['image'] = d['image']
+    if d.get('image_size') not in (None, ''):
+        out['image_size'] = bounded(d['image_size'], 10, 60)
     return out
 
 
@@ -614,6 +636,20 @@ def validate_notify_sound(c, d):
     if f['size'] > SOUND_MAX:
         raise HTTPException(413, 'file_too_large')
     return {'level': level, 'file_id': f['id'], 'sha256': f['sha256'], 'filename': f['name'], 'size': f['size']}
+
+
+def validate_notify_image(c, d):
+    """The picture of the notification look: an uploaded image (file_id) or {"reset": true} to remove it."""
+    if flag(d.get('reset')):
+        return {'reset': True}
+    f = c.execute('SELECT * FROM files WHERE id=?', (str(d.get('file_id') or ''),)).fetchone()
+    if not f:
+        raise HTTPException(400, 'file_not_found')
+    if f['kind'] != 'image':
+        raise HTTPException(400, 'unsupported_file')
+    if f['size'] > IMAGE_MAX:
+        raise HTTPException(413, 'file_too_large')
+    return {'file_id': f['id'], 'sha256': f['sha256'], 'filename': f['name'], 'size': f['size']}
 
 
 def validate_watcher(d, required=True):
@@ -1220,6 +1256,54 @@ def device_download(did: str, fid: str, r: Request):
     if not f or not (FILES / fid).exists():
         raise HTTPException(404, 'file_not_found')
     return FileResponse(FILES / fid, filename=f['name'], headers={'X-Sha256': f['sha256']})
+
+
+@app.post('/api/device/{did}/screenshot')
+async def device_screenshot(did: str, r: Request):
+    """The agent uploads a picture of the screen, only while it carries out a screenshot command."""
+    device_auth(r, did)
+    with db() as c:
+        if not c.execute("SELECT 1 FROM commands WHERE device_id=? AND action='screenshot' AND state='delivered'",
+                         (did,)).fetchone():
+            raise HTTPException(403, 'forbidden')
+    data = await r.body()
+    if len(data) > SCREENSHOT_MAX:
+        raise HTTPException(413, 'file_too_large')
+    if not data.startswith(b'\xff\xd8\xff'):
+        raise HTTPException(400, 'unsupported_file')
+    SCREENSHOTS.mkdir(parents=True, exist_ok=True)
+    tmp = SCREENSHOTS / f'{did}.part'
+    tmp.write_bytes(data)
+    tmp.replace(SCREENSHOTS / f'{did}.jpg')
+    return {'ok': True}
+
+
+@app.get('/api/devices/{did}/screenshot')
+def device_screenshot_file(did: str, r: Request):
+    current_user(r)
+    with db() as c:
+        get_device_row(c, did)
+    path = SCREENSHOTS / f'{did}.jpg'
+    if not path.exists():
+        raise HTTPException(404, 'not_found')
+    return FileResponse(path, media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/api/devices/{did}/notify-image')
+def device_notify_image(did: str, r: Request):
+    """The picture of the device's notification look, for the preview in the look editor: the hub's copy of the
+    file the device reports (by checksum), so only pictures sent through Fleet can be shown."""
+    current_user(r)
+    with db() as c:
+        row = get_device_row(c, did)
+        image = (notifications_of(json.loads(row['status_json'] or '{}')) or {}).get('image') or {}
+        f = c.execute("SELECT * FROM files WHERE sha256=? AND kind='image' ORDER BY rowid DESC LIMIT 1",
+                      (str(image.get('sha256') or ''),)).fetchone() if image.get('sha256') else None
+    if not f or not (FILES / f['id']).exists():
+        raise HTTPException(404, 'not_found')
+    media = mimetypes.guess_type(f['name'] or '')[0] or 'application/octet-stream'
+    return FileResponse(FILES / f['id'], media_type=media if media.startswith('image/') else 'application/octet-stream',
+                        headers={'Cache-Control': 'no-store'})
 
 
 @app.post('/api/device/{did}/files')

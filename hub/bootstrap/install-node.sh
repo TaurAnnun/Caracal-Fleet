@@ -111,6 +111,15 @@ step '[1/7] System packages (X display, Openbox)'
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl xserver-xorg xserver-xorg-legacy xinit openbox unclutter \
   x11-xserver-utils dbus-x11 python3 python3-requests python3-psutil >/dev/null
+# small boards (Raspberry Pi 4 with 1-2 GB): compressed swap in memory (zram), unless there is one already
+MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+if [ "${MEM_MB:-0}" -le 2048 ] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -q zram; then
+  if apt-get install -y -qq zram-tools >/dev/null 2>&1; then
+    printf 'ALGO=zstd\nPERCENT=50\nPRIORITY=100\n' > /etc/default/zramswap
+    systemctl enable zramswap.service >/dev/null 2>&1 || true
+    systemctl restart zramswap.service >/dev/null 2>&1 && echo "zram swap on (${MEM_MB} MB of memory)" || true
+  fi
+fi
 
 step '[2/7] Docker'
 DOCKER_CHANGED=''

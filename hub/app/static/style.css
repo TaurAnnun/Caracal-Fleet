@@ -402,6 +402,35 @@ a.stat:hover { transform: translateY(-2px); box-shadow: 0 10px 24px -10px rgb(0 
 .col-card ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
 .col-card li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+/* dashboards of a Grafana collection: shown, frozen one by one */
+.pl-expand { display: inline-flex; align-items: center; gap: 3px; margin-top: 3px; padding: 1px 7px 1px 3px; border: 0; border-radius: 6px; background: none; color: var(--accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.pl-expand:hover { background: var(--accent-soft); }
+.pl-expand .ic, .col-dash summary .ic { width: 14px; height: 14px; transform: rotate(180deg); transition: transform .2s cubic-bezier(.2, .8, .2, 1); }
+.pl-expand.open .ic, .col-dash[open] summary .ic { transform: rotate(270deg); }
+.pl-dash, .dash-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; }
+.pl-dash { padding: 6px 16px 6px 108px; border-bottom: 1px solid var(--line); background: var(--panel-2); font-size: 13px; animation: dash-in .22s cubic-bezier(.2, .8, .2, 1) both; }
+.pl-dash.playing, .dash-row.playing { box-shadow: inset 3px 0 0 var(--ok-led); }
+.pl-dash:hover .pl-actions, .dash-row:hover .pl-actions, .pl-dash:focus-within .pl-actions, .dash-row:focus-within .pl-actions { opacity: 1; }
+.dash-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dash-name .ic { flex: none; width: 15px; height: 15px; color: #f46800; }
+.dash-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes dash-in { from { opacity: 0; transform: translateY(-4px); } }
+.col-dash summary { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer; list-style: none; }
+.col-dash summary::-webkit-details-marker { display: none; }
+.col-card ul.dash-list { margin: 6px 0 0; padding: 0; list-style: none; color: var(--ink); max-height: 260px; overflow-y: auto; }
+.col-card .dash-row { padding: 4px 6px; border-radius: 8px; font-size: 13px; white-space: normal; }
+.col-card .dash-row:hover { background: var(--panel); }
+.col-dash .note { border: 0; border-radius: 8px; margin: 6px 0 0; }
+@media (max-width: 720px) { .pl-dash { padding-left: 24px; } }
+/* what the TV shows right now */
+.screen-card .shot { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; background: #0b0d12; display: grid; place-items: center; color: #8e8e93; font-size: 13.5px; text-align: center; }
+.screen-card .shot span { max-width: 30em; padding: 18px; }
+.screen-card .shot img { width: 100%; height: 100%; object-fit: contain; display: block; animation: shot-in .35s ease both; }
+.screen-card .card-head { gap: 10px; align-items: center; }
+.screen-card.collapsed .card-head { margin-bottom: 0; }
+.screen-card .card-head .muted { margin-left: auto; font-size: 12.5px; }
+@keyframes shot-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pl-dash, .screen-card .shot img { animation: none; } }
 .split { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 20px; align-items: start; }
 .split > div { display: grid; gap: 20px; min-width: 0; }
 #pEditor > div { display: grid; gap: 20px; }

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.12.1'
+HUB_VERSION = '4.13.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -90,6 +90,9 @@ ACTIONS = {
     'delete_notify_token': ('manage', None),
     'preview_watcher': ('content', 600),
     'grafana_discover': ('content', 600),
+    # agents from 4.11 with CARACAL 2026.10.10.4 and newer
+    'notify_image': ('content', None),
+    'screenshot': ('view', 120),
 }
 
 # Payload keys that must not stay in the hub: login credentials of web pages and of notification watchers travel

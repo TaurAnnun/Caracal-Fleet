@@ -9,6 +9,9 @@ const store = {
 };
 
 const S = {
+  openCols: new Set(),   // Grafana collections shown expanded (their dashboards)
+  shots: {},             // device id -> {at, url} of the last picture of its screen
+  shotBusy: new Set(),
   token: store.get('caracalToken', ''),
   me: null,
   lang: store.get('caracalLang', 'cs'),
@@ -1032,7 +1035,46 @@ function deviceOverview(d) {
         <dt>${t('localApi')}</dt><dd>${d.api_ok === false ? `<span class="tag critical">${t('unavailable')}</span>` : d.api_ok ? `<span class="tag ok">OK</span>` : '—'}</dd>
         <dt>${t('downloadSource')}</dt><dd>${d.download_source ? t('downloadSource_' + d.download_source) : '—'}${can('manage') && d.download_source ? ` <button class="btn sm ghost" data-do="downloadSource" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
         <dt>${t('pendingCommands')}</dt><dd>${d.pending_commands}</dd>${d.notes ? `<dt>${t('notes')}</dt><dd>${esc(d.notes)}</dd>` : ''}</dl></section>
-    </div>${nodeAdminCard(d)}`;
+    </div>${nodeAdminCard(d)}${screenCard(d)}`;
+}
+
+// What the TV shows right now: the node's overlay takes a picture of the screen when asked (agent 4.11 and
+// CARACAL 2026.10.10.4). The picture is fetched with the session token and shown from a blob URL.
+const screenSupport = d => (d.capabilities || {}).screenshot === true;
+async function screenBlob(id) {
+  const r = await fetch(`/api/devices/${encodeURIComponent(id)}/screenshot`, { headers: { Authorization: 'Bearer ' + S.token } });
+  if (!r.ok) throw new Error('not_found');
+  return URL.createObjectURL(await r.blob());
+}
+async function captureScreen(id) {
+  const c = await api(`/api/devices/${encodeURIComponent(id)}/commands`, { method: 'POST', json: { action: 'screenshot', payload: {} } });
+  const until = Date.now() + 60000;
+  while (Date.now() < until) {
+    await new Promise(res => setTimeout(res, 1200));
+    const row = await api('/api/commands/' + c.id);
+    if (row.state === 'completed') return screenBlob(id);
+    if (!['queued', 'delivered'].includes(row.state)) throw new Error(row.result || 'act_failed');
+  }
+  throw new Error('screenshot_timeout');
+}
+async function loadShot(id, at) {
+  const old = S.shots[id];
+  S.shots[id] = { at, url: old && old.url, loading: true };
+  try {
+    const url = await screenBlob(id);
+    if (old && old.url) URL.revokeObjectURL(old.url);
+    S.shots[id] = { at, url };
+  } catch { S.shots[id] = { at, url: old && old.url }; }
+  render();
+}
+function screenCard(d) {
+  if (!screenSupport(d) && !d.screenshot_at) return '';
+  const shot = S.shots[d.id], busy = S.shotBusy.has(d.id), hidden = store.get('caracalScreenHidden') === '1';
+  if (!hidden && d.screenshot_at && (!shot || (shot.at !== d.screenshot_at && !shot.loading))) setTimeout(() => loadShot(d.id, d.screenshot_at));
+  return `<section class="card screen-card ${hidden ? 'collapsed' : ''}"><div class="card-head"><h2>${t('onScreen')}</h2>${d.screenshot_at && !hidden ? `<span class="muted">${t('capturedAgo', { ago: ago(d.screenshot_at) })}</span>` : '<span class="muted"></span>'}
+      ${screenSupport(d) && can('view') && !hidden ? `<button class="btn sm" data-do="screenshot" data-id="${esc(d.id)}" ${d.online && !busy ? '' : 'disabled'}>${icon('refresh')}${busy ? t('capturing') : t(d.screenshot_at ? 'refresh' : 'showScreen')}</button>` : ''}
+      <button class="btn sm ghost" data-do="screenToggle" aria-expanded="${hidden ? 'false' : 'true'}">${t(hidden ? 'show' : 'hide')}</button></div>
+    ${hidden ? '' : `<div class="shot ${shot && shot.url ? 'has' : ''}">${shot && shot.url ? `<img src="${esc(shot.url)}" alt="${esc(t('onScreen'))}">` : `<span>${busy ? t('capturing') : t('onScreenHint')}</span>`}</div>`}</section>`;
 }
 
 // The node's own web administration (CARACAL on port 8080): its administrator and the countdown on the TV.
@@ -1281,11 +1323,16 @@ function renderPlaylist(el, d) {
     ${d.pending_commands ? `<div class="note info">${t('pendingNote', { n: d.pending_commands })}</div>` : ''}
     ${d.capabilities.upload === false && edit ? `<div class="note">${t('noMediaApi')}</div>` : ''}
     <ol class="playlist" id="plist">${assets.map((a, i) => {
-      const playing = d.online && String(a.id) === String(d.current_asset_id ?? d.current_id);
+      // a Grafana collection plays its dashboards one by one; nodes from 2026.10.10.4 report them
+      const dash = isTag(a.kind) ? (d.collections.find(c => String(c.id) === String(a.id)) || {}).dashboards : null;
+      const nowId = String(d.current_asset_id ?? d.current_id);
+      const playing = d.online && (String(a.id) === nowId || !!(dash && dash.some(x => String(x.id) === nowId)));
+      const open = dash && dash.length && S.openCols.has(String(a.id));
       return `<li class="pl-row ${playing ? 'playing' : ''} ${a.enabled ? '' : 'disabled'}" data-aid="${esc(a.id)}" ${edit ? 'draggable="true"' : ''}>
         ${edit ? `<span class="handle" title="${t('dragToReorder')}">${icon('drag')}</span>` : ''}<span class="idx">${i + 1}</span>
         <span class="kind k-${esc(a.kind)}">${kindIcon(a.kind)}</span>
-        <div class="pl-main"><b>${esc(a.name)}</b><small>${esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' ? ' · ' + esc(a.source) : ''}</small></div>
+        <div class="pl-main"><b>${esc(a.name)}</b><small>${esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' ? ' · ' + esc(a.source) : ''}</small>
+          ${dash && dash.length ? `<button class="pl-expand ${open ? 'open' : ''}" data-do="toggleCol" data-col="${esc(a.id)}" aria-expanded="${open ? 'true' : 'false'}">${icon('chev')}${t('dashboardsCount', { n: dash.length })}</button>` : ''}</div>
         <span class="pl-dur">${a.duration ? dur(a.duration) : (a.kind === 'video' ? t('fullLength') : '—')}</span>
         <span class="pl-tags">${playing ? `<span class="tag ok">${d.frozen ? icon('snow') + t('frozen') : icon('play') + t('playing')}</span>` : ''}${a.enabled ? '' : `<span class="tag">${t('disabled')}</span>`}${loginTag(d, a)}</span>
         <span class="pl-actions">
@@ -1299,7 +1346,7 @@ function renderPlaylist(el, d) {
           <button class="icon-btn" title="${t('edit')}" data-do="editAsset" data-id="${esc(d.id)}" data-item="${esc(a.id)}">${icon('edit')}</button>
           <button class="icon-btn" title="${t('copyTo')}" data-do="copyContent" data-id="${esc(d.id)}" data-item="${esc(a.id)}">${icon('copy')}</button>
           <button class="icon-btn danger" title="${t('delete')}" data-do="deleteAsset" data-id="${esc(d.id)}" data-item="${esc(a.id)}" data-name="${esc(a.name)}">${icon('trash')}</button>` : ''}
-        </span></li>`;
+        </span></li>${open ? dashboardRows(d, dash, ctl && a.enabled, 'pl-dash') : ''}`;
     }).join('') || `<li class="empty">${d.api_ok === false ? t('playlistUnavailable') : t('playlistEmpty')}</li>`}</ol></section>`;
   if (el._dragging) return;
   patch(el, html);
@@ -1344,6 +1391,8 @@ function renderCollections(d) {
     <div class="col-grid">${d.collections.map(c => `<div class="col-card">
       <div class="col-head">${icon('grafana')}<b>${esc(c.name)}</b><span class="muted">${t('grafanaTag')}: ${esc(c.tag || '—')}${c.duration ? ' · ' + dur(c.duration) : ''}</span></div>
       <ul><li title="${esc(c.grafana_url)}">${esc(c.grafana_url || '—')}</li></ul>
+      ${c.dashboards ? `<details class="col-dash" ${S.openCols.has(String(c.id)) ? 'open' : ''} data-col="${esc(c.id)}"><summary>${icon('chev')}${t('dashboardsCount', { n: c.dashboards.length })}</summary>
+        ${c.dashboards_error ? `<p class="note">${esc(c.dashboards_error)}</p>` : ''}<ul class="dash-list">${dashboardRows(d, c.dashboards, ctl, 'dash-row')}</ul></details>` : ''}
       <div class="col-actions">
         ${ctl ? `<button class="btn sm" data-do="cmd" data-id="${esc(d.id)}" data-act="show_collection" data-col="${esc(c.id)}">${icon('eye')}${t('showNow')}</button>
         <button class="btn sm" data-do="freeze" data-id="${esc(d.id)}" data-col="${esc(c.id)}" data-name="${esc(c.name)}">${icon('snow')}${t('freezeItem')}</button>` : ''}
@@ -1351,6 +1400,24 @@ function renderCollections(d) {
         <button class="icon-btn" title="${t('copyTo')}" data-do="copyContent" data-id="${esc(d.id)}" data-col="${esc(c.id)}">${icon('copy')}</button>
         <button class="icon-btn danger" title="${t('delete')}" data-do="deleteCollection" data-id="${esc(d.id)}" data-col="${esc(c.id)}" data-name="${esc(c.name)}">${icon('trash')}</button>` : ''}
       </div></div>`).join('') || `<div class="empty">${t('noCollections')}</div>`}</div></section>`;
+}
+
+// The dashboards of a Grafana collection, each can be shown or frozen on its own like a playlist item.
+// an expanded collection card stays expanded when the view is redrawn
+document.addEventListener('toggle', e => {
+  const el = e.target;
+  if (!el.matches || !el.matches('details.col-dash')) return;
+  el.open ? S.openCols.add(el.dataset.col) : S.openCols.delete(el.dataset.col);
+}, true);
+function dashboardRows(d, list, ctl, cls) {
+  const nowId = String(d.current_asset_id ?? d.current_id);
+  return (list || []).map(x => {
+    const playing = d.online && String(x.id) === nowId;
+    return `<li class="${cls} ${playing ? 'playing' : ''}"><span class="dash-name">${icon('grafana')}<span title="${esc(x.source)}">${esc(x.name)}</span></span>
+      ${playing ? `<span class="tag ok">${d.frozen ? icon('snow') + t('frozen') : icon('play') + t('playing')}</span>` : ''}
+      <span class="pl-actions">${ctl ? `<button class="icon-btn" title="${t('showNow')}" data-do="cmd" data-id="${esc(d.id)}" data-act="show" data-item="${esc(x.id)}">${icon('eye')}</button>
+        <button class="icon-btn" title="${t('freezeItem')}" data-do="freeze" data-id="${esc(d.id)}" data-item="${esc(x.id)}" data-name="${esc(x.name)}">${icon('snow')}</button>` : ''}</span></li>`;
+  }).join('') || `<li class="${cls} muted">${t('noDashboards')}</li>`;
 }
 
 // ---------- login profiles of web pages
@@ -1497,6 +1564,8 @@ async function notifyLogDialog(id) {
 }
 
 function notifyDialog(ids) {
+  // the picture of the notification look, placed and sized for this one notification (nodes from 2026.10.10.4)
+  const picture = ids.map(dev).some(x => x && (x.capabilities || {}).notify_image === true);
   modal({
     title: t('notifySend'), submit: t('notifySendSubmit'),
     body: `<div class="form">${ids.length > 1 ? `<p class="muted">${t('notifyToSelected', { n: ids.length })}</p>` : ''}
@@ -1504,12 +1573,16 @@ function notifyDialog(ids) {
       <label>${t('notifyMessage')}<textarea name="message" rows="3" maxlength="600"></textarea></label>
       <div class="row2"><label>${t('notifyLevel')}<select name="level">${choice(NOTIFY_LEVELS, 'info', 'notifyLevel_')}</select></label>
       <label>${t('notifyDuration')}<input name="duration" type="number" min="3" max="120" placeholder="${esc(t('notifyDurationDefault'))}"></label></div>
-      <label>${t('notifySound')}<select name="sound"><option value="">${t('notifySoundBySettings')}</option><option value="1">${t('notifySoundPlay')}</option><option value="0">${t('notifySoundSilent')}</option></select></label></div>`,
+      <label>${t('notifySound')}<select name="sound"><option value="">${t('notifySoundBySettings')}</option><option value="1">${t('notifySoundPlay')}</option><option value="0">${t('notifySoundSilent')}</option></select></label>
+      ${picture ? `<div class="row2"><label>${t('notifyPicture')}<select name="image"><option value="">${t('notifyPictureByLook')}</option>${['none', 'left', 'right', 'top', 'bottom', 'background'].map(v => `<option value="${v}">${t('notifyPicture_' + v)}</option>`).join('')}</select></label>
+      <label>${t('notifyPictureSize')}<input name="image_size" type="number" min="10" max="60" step="5" placeholder="${esc(t('notifyPictureByLook'))}"></label></div>` : ''}</div>`,
     onSubmit: data => {
       if (!data.title.trim() && !data.message.trim()) throw new Error('notification_text_required');
       const payload = { title: data.title.trim(), message: data.message.trim(), level: data.level };
       if (data.duration) payload.duration = Number(data.duration);
       if (data.sound) payload.sound = data.sound === '1';
+      if (data.image) payload.image = data.image;
+      if (data.image_size) payload.image_size = Number(data.image_size);
       return ids.length === 1 ? sendCommand(ids[0], 'notify', payload) : sendBulk(ids, 'notify', payload);
     },
   });
@@ -1553,15 +1626,34 @@ function notifySoundDialog(ids, sounds = {}) {
 
 // The look of the notifications on the TV, edited visually (static/notify-style.js, the same editor as on the node).
 const lookSupport = d => !!(d && (d.notify_style || d.notifications?.settings?.style));
-function styleDialog(ids, settings) {
-  let editor = null;
+function styleDialog(ids, settings, one = null) {
+  let editor = null, picture = null;   // picture: {file_id} of a new upload or {reset: true}, sent when saving
+  const devs = ids.map(dev).filter(Boolean);
+  const canPicture = devs.length && devs.every(x => (x.capabilities || {}).notify_image === true);
+  const canCapture = one && screenSupport(one) && one.online;
   const dlg = modal({
     title: t('notifyLook'), wide: true, submit: t('save'),
-    body: `${ids.length > 1 ? `<p class="muted">${t('notifyLookToSelected', { n: ids.length })}</p>` : ''}<p class="muted">${t('notifyLookHint')}</p><div id="lookEditor"></div>`,
+    body: `${ids.length > 1 ? `<p class="muted">${t('notifyLookToSelected', { n: ids.length })}</p>` : ''}<p class="muted">${t('notifyLookHint')}</p>
+      ${!canPicture ? `<p class="muted">${t('notifyPictureNeedsUpdate')}</p>` : one?.notifications?.image ? `<p class="muted">${t('notifyPictureOnDevice', { name: esc(one.notifications.image.name || '') })}</p>` : ''}<div id="lookEditor"></div>`,
     onOpen: form => {
-      editor = NotifyStyle.editor($('#lookEditor', form), settings.style, { t: (cs, en) => (S.lang === 'cs' ? cs : en), position: settings.position, scale: settings.scale });
+      editor = NotifyStyle.editor($('#lookEditor', form), settings.style, {
+        t: (cs, en) => (S.lang === 'cs' ? cs : en), position: settings.position, scale: settings.scale,
+        onImage: canPicture ? async file => {
+          if (file.size > 5 * 1024 * 1024) { toast(errText(new Error('file_too_large')), 'err'); throw new Error('file_too_large'); }
+          try { const up = await uploadFile(file, () => {}); picture = { file_id: up.id }; } catch (err) { toast(errText(err), 'err'); throw err; }
+          return URL.createObjectURL(file);
+        } : null,
+        onImageRemove: canPicture ? async () => { picture = { reset: true }; } : null,
+        capture: canCapture ? () => captureScreen(one.id) : null,
+      });
+      // the picture the device has, when it was sent through Fleet (the hub keeps the file)
+      if (one && one.notifications && one.notifications.image) {
+        fetch(`/api/devices/${encodeURIComponent(one.id)}/notify-image`, { headers: { Authorization: 'Bearer ' + S.token } })
+          .then(r => (r.ok ? r.blob() : null)).then(b => { if (b && editor && !picture) editor.setImage(URL.createObjectURL(b)); }).catch(() => {});
+      }
     },
-    onSubmit: () => {
+    onSubmit: async () => {
+      if (picture) await (ids.length === 1 ? sendCommand(ids[0], 'notify_image', picture) : sendBulk(ids, 'notify_image', picture));
       const payload = { style: editor.get() };
       return ids.length === 1 ? sendCommand(ids[0], 'notify_settings', payload) : sendBulk(ids, 'notify_settings', payload);
     },
@@ -3060,7 +3152,7 @@ const ACTIONS_UI = {
   async notifyStyle(b) {
     const ids = targetIds(b);
     const one = ids.length === 1 ? await detailOf(ids[0]) : null;
-    styleDialog(ids, one?.notifications?.settings || {});
+    styleDialog(ids, one?.notifications?.settings || {}, one);
   },
   async muteAlerts(b) {
     const ids = targetIds(b), one = b.dataset.id && dev(b.dataset.id);
@@ -3143,6 +3235,19 @@ const ACTIONS_UI = {
     if (await confirmBox(t('confirmDeleteItem', { name: esc(b.dataset.name) }))) await sendCommand(b.dataset.id, 'delete_asset', { id: b.dataset.item });
   },
   freeze(b) { freezeDialog(b.dataset.id, b.dataset.item, b.dataset.col, b.dataset.name); },
+  screenToggle() { store.set('caracalScreenHidden', store.get('caracalScreenHidden') === '1' ? '0' : '1'); render(); },
+  toggleCol(b) { const k = String(b.dataset.col); S.openCols.has(k) ? S.openCols.delete(k) : S.openCols.add(k); render(); },
+  async screenshot(b) {
+    const id = b.dataset.id;
+    S.shotBusy.add(id); render();
+    try {
+      const url = await captureScreen(id);
+      const old = S.shots[id];
+      if (old && old.url) URL.revokeObjectURL(old.url);
+      S.shots[id] = { at: Date.now() / 1000, url, fresh: true };
+    } catch (err) { toast(errText(err), 'err'); }
+    S.shotBusy.delete(id); render(); tick();
+  },
   move(b) {
     const order = orderedAssets(S.detail).map(a => String(a.id));
     const i = order.indexOf(b.dataset.item), j = i + Number(b.dataset.dir);

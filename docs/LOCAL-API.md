@@ -45,6 +45,8 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Node token | `PUT /notify/tokens/{id}`, `DELETE /notify/tokens/{id}` | `{name, rate_per_min, enabled}`; new tokens are created in the node's administration only (shown once) |
 | Try a watcher | `POST /notify/watchers/preview` | the watcher fields (and `id` to use the stored credentials) → `{count, samples}`, nothing is saved |
 | Try a Grafana tag | `POST /grafana/discover` | `{grafana_url, tag}` → `{count, dashboards}` |
+| Notification picture | `POST /notify/image`, `DELETE /notify/image` | multipart `file`: PNG, JPEG, GIF or WebP up to 5 MB for the notification look (CARACAL 2026.10.10.4) |
+| Screenshot | `POST /screenshot` | a picture of what the TV shows, taken by the node's overlay → the JPEG (waits up to 15 s; 504 when the overlay does not answer) |
 
 All paths start with `/api/fleet/v1`. CARACAL rules: the display time is at least 5 s (videos loop for the whole
 time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.mp4 .webm .mkv`.
@@ -100,6 +102,12 @@ time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.m
   `history_count` and `audit_count` the size of the history and the audit log (their entries: `GET /notify/log`).
 - `requests` counts restarts requested in the node's own admin UI. In Docker the app cannot reboot the host, so
   the agent performs a reboot when the counter increases.
+
+`collections` (CARACAL 2026.10.10.4) lists the dashboards of each Grafana collection:
+`[{"id": 4, "name": "Výroba", "dashboards": [{"id": 400000, "name": "Linka 1", "source": "https://…"}], "error": ""}]`.
+A dashboard id (collection id × 100000 + index) can be shown or frozen like a playlist item. `notifications.image`
+describes the picture of the notification look (`{name, size, type, sha256, uploaded}`), `screenshot` when the last
+picture of the screen was taken.
 
 ### Show and freeze
 

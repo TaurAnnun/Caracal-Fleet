@@ -608,3 +608,124 @@ def test_try_watcher_and_grafana_tag_from_fleet(env):
     assert found['count'] == 2 and found['dashboards'][0]['title'] == 'tv 0'
     one = requests.get(f"{env['hub']}/api/commands/{row['id']}", headers=env['h']).json()
     assert one['state'] == 'completed' and json.loads(one['payload_json'])['secret'] == '•••'
+
+
+def test_single_dashboard_of_a_collection_from_fleet(env):
+    """Fleet lists the dashboards of a Grafana collection and shows or freezes a single one, like the node's web."""
+    if not any(x['kind'] == 'grafana-tag' for x in node_assets(env)):
+        run(env, 'add_collection', {'name': 'Linka', 'grafana_url': 'https://grafana.example', 'tag': 'linka', 'duration': 30})
+    beat(env)
+    col = next(c for c in device(env)['collections'] if c['dashboards'])
+    assert [x['name'] for x in col['dashboards']] == [f"{col['tag']} 0", f"{col['tag']} 1"]
+    one = col['dashboards'][1]
+    assert one['id'] == int(col['id']) * 100000 + 1
+    run(env, 'freeze', {'item_id': one['id'], 'minutes': 0})
+    command = env['local'].get(env['node'] + '/api/v6/player/command').json()
+    assert command['action'] == 'freeze' and command['item_id'] == one['id']
+    r = requests.post(f"{env['hub']}/api/devices/{env['id']}/commands", headers=env['h'],
+                      json={'action': 'show', 'payload': {'item_id': int(col['id']) * 100000 + 99}})
+    assert r.status_code == 409 and r.json()['detail'] == 'item_not_found'
+    run(env, 'unfreeze')
+
+
+PNG = (b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89'
+       b'\x00\x00\x00\rIDATx\x9cc\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82')
+
+
+def test_notification_picture_and_new_look_from_fleet(env):
+    """A picture for the notification look goes from Fleet to the node (and its overlay); the richer look keys too."""
+    h, hub = env['h'], env['hub']
+    assert device(env)['capabilities']['notify_image'] is True
+    up = requests.post(hub + '/api/files', data=PNG, headers={**h, 'Content-Type': 'image/png', 'X-File-Name': 'logo.png'}).json()
+    run(env, 'notify_image', {'file_id': up['id']})
+    assert (env['data'] / 'notify-image').read_bytes() == PNG
+    image = device(env)['notifications']['image']
+    assert image['name'] == 'logo.png' and image['type'] == 'image/png'
+    overlay = env['local'].get(env['node'] + '/api/notify/overlay').json()
+    assert overlay['image'] == image['sha256'][:16]
+    assert env['local'].get(env['node'] + '/api/notify/image/overlay').content == PNG
+    # the look editor in Fleet previews the picture the device has
+    assert requests.get(f"{hub}/api/devices/{env['id']}/notify-image", headers=h).content == PNG
+
+    run(env, 'notify_settings', {'style': {'radius': 24, 'gradient': 'diagonal', 'bg2': '#4C1D95', 'bg_opacity': 40, 'blur': 60,
+                                           'shadow': 80, 'image': True, 'image_pos': 'top', 'border_color': '', 'progress_pos': 'top'}})
+    st = env['mod']._ntf_settings()['style']
+    assert (st['radius'], st['gradient'], st['bg2'], st['image_pos'], st['progress_pos']) == (24, 'diagonal', '#4c1d95', 'top', 'top')
+    assert env['local'].get(env['node'] + '/api/notify/overlay').json()['style']['blur'] == 60
+    r = requests.post(f"{hub}/api/devices/{env['id']}/commands", headers=h,
+                      json={'action': 'notify_settings', 'payload': {'style': {'radius': 500}}})
+    env['agent'].run_commands()
+    row = requests.get(f"{hub}/api/commands/{r.json()['id']}", headers=h).json()
+    assert row['state'] == 'failed' and 'radius' in row['result']
+
+    # a file that is no picture is refused by the hub, a fake one by the node
+    mp3 = requests.post(hub + '/api/files', data=b'ID3' + b'\x00' * 50, headers={**h, 'Content-Type': 'audio/mpeg', 'X-File-Name': 'x.mp3'}).json()
+    assert requests.post(f"{hub}/api/devices/{env['id']}/commands", headers=h,
+                         json={'action': 'notify_image', 'payload': {'file_id': mp3['id']}}).json()['detail'] == 'unsupported_file'
+    fake = requests.post(hub + '/api/files', data=b'<svg/>', headers={**h, 'Content-Type': 'image/png', 'X-File-Name': 'x.png'}).json()
+    cid = requests.post(f"{hub}/api/devices/{env['id']}/commands", headers=h, json={'action': 'notify_image', 'payload': {'file_id': fake['id']}}).json()['id']
+    env['agent'].run_commands()
+    assert requests.get(f"{hub}/api/commands/{cid}", headers=h).json()['state'] == 'failed'
+    assert (env['data'] / 'notify-image').read_bytes() == PNG
+
+    # each notification can place, size or hide the picture
+    run(env, 'notify_clear')
+    run(env, 'notify', {'title': 'Oběd', 'level': 'info', 'image': 'bottom', 'image_size': 40})
+    cur = env['local'].get(env['node'] + '/api/notify/overlay').json()['current']
+    assert cur['look'] == {'image': True, 'image_pos': 'bottom', 'image_size': 40}
+    run(env, 'notify_clear')
+    run(env, 'notify', {'title': 'Bez obrázku', 'level': 'info', 'image': 'none'})
+    assert env['local'].get(env['node'] + '/api/notify/overlay').json()['current']['look'] == {'image': False}
+    run(env, 'notify_clear')
+    for bad in ({'image': 'middle'}, {'image_size': 90}):
+        r = requests.post(f"{hub}/api/devices/{env['id']}/commands", headers=h, json={'action': 'notify', 'payload': {'title': 'x', **bad}})
+        assert r.json()['detail'] == 'invalid_value', bad
+    # the node's own API refuses them too
+    assert requests.post(env['node'] + '/api/fleet/v1/notify', headers={'X-Fleet-Key': env['key']}, json={'title': 'x', 'image': 'middle'}).status_code == 400
+
+    run(env, 'notify_image', {'reset': True})
+    assert not (env['data'] / 'notify-image').exists() and device(env)['notifications']['image'] is None
+    assert env['local'].get(env['node'] + '/api/notify/overlay').json()['image'] == ''
+    run(env, 'notify_settings', {'style': env['mod']._NTF_STYLE})
+
+
+def fake_overlay(env, error='', stop=None):
+    """What player/overlay.py does: sees the request in its poll and uploads a JPEG of the screen (or an error)."""
+    import threading
+
+    def loop():
+        for _ in range(100):
+            request = env['local'].get(env['node'] + '/api/notify/overlay').json().get('screenshot')
+            if request:
+                url = env['node'] + f'/api/screenshot/upload?id={request}' + (f'&error={error}' if error else '')
+                env['local'].post(url, data=b'' if error else b'\xff\xd8\xff\xe0fake-jpeg', headers={'Content-Type': 'image/jpeg'})
+                return
+            time.sleep(.1)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
+
+
+def test_screenshot_from_fleet(env):
+    """Fleet asks for a picture of the screen: agent -> node -> overlay, and the picture ends up in the hub."""
+    h, hub = env['h'], env['hub']
+    assert device(env)['capabilities']['screenshot'] is True and not device(env).get('screenshot_at')
+    fake_overlay(env)
+    run(env, 'screenshot')
+    shot = requests.get(f"{hub}/api/devices/{env['id']}/screenshot", headers=h)
+    assert shot.status_code == 200 and shot.content == b'\xff\xd8\xff\xe0fake-jpeg'
+    assert shot.headers['content-type'] == 'image/jpeg' and device(env)['screenshot_at']
+    # the node's own admin sees the same picture
+    assert env['mod']._shot_info()['taken'] and (env['data'] / 'screenshot.jpg').read_bytes() == shot.content
+    # a screen that cannot be read: the command fails with the overlay's reason
+    fake_overlay(env, error='no display')
+    r = requests.post(f"{hub}/api/devices/{env['id']}/commands", headers=h, json={'action': 'screenshot', 'payload': {}})
+    env['agent'].run_commands()
+    row = requests.get(f"{hub}/api/commands/{r.json()['id']}", headers=h).json()
+    assert row['state'] == 'failed' and 'no display' in row['result']
+    # uploads only by the overlay of the device itself, only when asked
+    assert requests.post(env['node'] + '/api/screenshot/upload?id=x', data=b'\xff\xd8\xff').status_code == 403
+    assert env['local'].post(env['node'] + '/api/screenshot/upload?id=nope', data=b'\xff\xd8\xff').status_code == 409
+    # and the hub takes a picture only from a device carrying out a screenshot command
+    assert requests.post(f"{hub}/api/device/{env['id']}/screenshot", data=b'\xff\xd8\xff',
+                         headers={'X-Device-Token': env['key']}).status_code == 403

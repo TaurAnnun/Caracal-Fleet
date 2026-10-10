@@ -2,7 +2,17 @@
 import json
 import time
 
-from .core import AGENT_VERSION, ONLINE_TIMEOUT, version_tuple
+from .core import AGENT_VERSION, DATA, ONLINE_TIMEOUT, version_tuple
+
+SCREENSHOTS = DATA / 'screenshots'
+
+
+def screenshot_time(did):
+    """When the last picture of the device's screen arrived (None = never)."""
+    try:
+        return (SCREENSHOTS / f'{did}.jpg').stat().st_mtime
+    except OSError:
+        return None
 
 MEDIA_KINDS = ('image', 'video')
 COLLECTION_KIND = 'grafana-tag'   # Grafana collections kept as playlist assets on CARACAL nodes
@@ -39,9 +49,31 @@ def grafana_config(source):
 
 
 def collections_of(status):
-    """Grafana collections are the playlist assets of kind grafana-tag ('profiles' are login profiles)."""
-    return [normalize_asset(a) for a in dicts(status.get('assets'))
-            if str(a.get('kind') or a.get('type')) == COLLECTION_KIND]
+    """Grafana collections are the playlist assets of kind grafana-tag ('profiles' are login profiles).
+    Nodes from CARACAL 2026.10.10.4 also report the dashboards of each collection, so a single one can be shown."""
+    found = {}
+    for col in dicts(status.get('collections')):
+        if col.get('id') is None:
+            continue
+        found[str(col['id'])] = {
+            'dashboards': [{'id': x['id'], 'name': str(x.get('name') or '')[:300], 'source': str(x.get('source') or '')[:2000]}
+                           for x in dicts(col.get('dashboards'))[:500] if isinstance(x.get('id'), int) and not isinstance(x.get('id'), bool)],
+            'error': str(col.get('error') or '')[:300]}
+    out = []
+    for a in dicts(status.get('assets')):
+        if str(a.get('kind') or a.get('type')) != COLLECTION_KIND:
+            continue
+        col = normalize_asset(a)
+        extra = found.get(str(col.get('id')))
+        col['dashboards'] = extra['dashboards'] if extra else None   # None: the node does not report them
+        col['dashboards_error'] = extra['error'] if extra else ''
+        out.append(col)
+    return out
+
+
+def dashboards_of(status):
+    """All dashboards of all collections (ids the player accepts for show and freeze)."""
+    return [x for col in collections_of(status) for x in col.get('dashboards') or []]
 
 
 def profiles_of(status):
@@ -76,6 +108,8 @@ def notifications_of(status):
     return {'settings': n.get('settings') if isinstance(n.get('settings'), dict) else {},
             'waiting': _int(n.get('waiting')), 'current': n.get('current'), 'tokens': _int(n.get('tokens')),
             'sounds': n.get('sounds') if isinstance(n.get('sounds'), dict) else {},
+            'image': {k: n['image'].get(k) for k in ('name', 'size', 'type', 'sha256', 'uploaded')}
+                     if isinstance(n.get('image'), dict) and n['image'] else None,
             'watchers': [w for w in n.get('watchers') or [] if isinstance(w, dict)],
             # agents from 4.9: the queue, the size of the history and the audit log, the node's own tokens
             'queue': [x for x in n.get('queue') or [] if isinstance(x, dict)] if 'queue' in n else None,
@@ -182,6 +216,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'caracal_image': status.get('caracal_image') or '',
         # where the node downloads CARACAL and system packages ('' = agent too old to report it)
         'download_source': status.get('download_source') or '', 'arch': status.get('arch') or '',
+        'screenshot_at': screenshot_time(row['id']),
         'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in dicts(status.get('assets'))),
         'admin': admin_of(status), 'overlay': overlay_of(status),
     }

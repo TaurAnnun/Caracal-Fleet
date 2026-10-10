@@ -33,7 +33,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.10.1'
+VERSION = '4.11.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -97,6 +97,10 @@ ENDPOINTS = {
     'notify_token_delete': ('DELETE', '/api/fleet/v1/notify/tokens/{id}'),
     'preview_watcher': ('POST', '/api/fleet/v1/notify/watchers/preview'),
     'grafana_discover': ('POST', '/api/fleet/v1/grafana/discover'),
+    # a picture for the notification look and a picture of the screen (CARACAL 2026.10.10.4 and newer)
+    'notify_image': ('POST', '/api/fleet/v1/notify/image'),
+    'notify_image_delete': ('DELETE', '/api/fleet/v1/notify/image'),
+    'screenshot': ('POST', '/api/fleet/v1/screenshot'),
 }
 # the node's own first-run setup, for CARACAL versions without the Fleet admin endpoint
 SETUP_STATUS, SETUP = '/api/setup-status', '/api/setup'
@@ -246,6 +250,9 @@ class Agent:
                 # custom MP3 per level: only its name, size and checksum
                 'sounds': {level: {k: v.get(k) for k in ('name', 'size', 'sha256', 'uploaded')}
                            for level, v in (n.get('sounds') or {}).items() if isinstance(v, dict)},
+                # the picture of the notification look: only its name, size, type and checksum
+                **({'image': {k: n['image'].get(k) for k in ('name', 'size', 'type', 'sha256', 'uploaded')}}
+                   if isinstance(n.get('image'), dict) and n['image'] else {}),
                 'watchers': [{k: w.get(k) for k in WATCHER_PUBLIC if k in w} for w in n.get('watchers') or []
                              if isinstance(w, dict)],
                 **({'queue': [{k: x.get(k) for k in QUEUE_PUBLIC} for x in n['queue'] if isinstance(x, dict)][:30]}
@@ -453,6 +460,9 @@ class Agent:
 
     def _check_item(self, snap, key, value):
         items = self.assets_of(snap) if key == 'item_id' else self.collections_of(snap)
+        if key == 'item_id':   # a single dashboard of a Grafana collection (CARACAL 2026.10.10.4 reports them)
+            items = items + [x for col in snap.get('collections') or [] if isinstance(col, dict)
+                             for x in col.get('dashboards') or [] if isinstance(x, dict)]
         match = next((x for x in items if str(x.get('id')) == str(value)), None)
         if match is None:
             raise RuntimeError(f'Item {value} does not exist on this node')
@@ -596,6 +606,26 @@ class Agent:
                                                                                'audio/mpeg')}, timeout=120))
         finally:
             os.unlink(path)
+
+    def do_notify_image(self, p):
+        """The picture of the notification look (downloaded from the hub and checked), or none again."""
+        if p.get('reset'):
+            return self.body(self.local('notify_image_delete'))
+        path = self.download_file(p['file_id'], p.get('sha256'))
+        try:
+            with open(path, 'rb') as f:
+                return self.body(self.local('notify_image', files={'file': (p.get('filename') or 'picture', f,
+                                                                       'application/octet-stream')}, timeout=120))
+        finally:
+            os.unlink(path)
+
+    def do_screenshot(self, p):
+        """A picture of what the TV shows now (taken by the node's overlay), uploaded to the hub."""
+        r = self.local('screenshot', timeout=40)
+        if not r.content.startswith(b'\xff\xd8\xff'):
+            raise RuntimeError('The node did not return a picture')
+        self.hub('POST', '/screenshot', data=r.content, headers={'Content-Type': 'image/jpeg'}, timeout=60)
+        return {'size': len(r.content)}
 
     def do_check_watcher(self, p):
         return self.body(self.local('check_watcher', {'id': p['id']}, timeout=60))
